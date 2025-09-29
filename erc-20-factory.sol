@@ -71,11 +71,70 @@ abstract contract ReentrancyGuard {
 }
 
 /**
- * @title FactoryERC20
- * @dev Improved factory-deployable ERC-20 implementation with security fixes
- * @notice This contract implements a secure, gas-optimized ERC-20 token designed for factory deployment
+ * @dev Pausable contract for emergency stops
  */
-contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, ReentrancyGuard {
+abstract contract Pausable is Context {
+    bool private _paused;
+    address private _pauser;
+
+    event Paused(address account);
+    event Unpaused(address account);
+    event PauserTransferred(address indexed previousPauser, address indexed newPauser);
+
+    error EnforcedPause();
+    error ExpectedPause();
+    error OnlyPauser();
+
+    constructor(address pauser_) {
+        _pauser = pauser_;
+    }
+
+    modifier onlyPauser() {
+        if (_msgSender() != _pauser) revert OnlyPauser();
+        _;
+    }
+
+    modifier whenNotPaused() {
+        if (_paused) revert EnforcedPause();
+        _;
+    }
+
+    modifier whenPaused() {
+        if (!_paused) revert ExpectedPause();
+        _;
+    }
+
+    function paused() public view virtual returns (bool) {
+        return _paused;
+    }
+
+    function pauser() public view virtual returns (address) {
+        return _pauser;
+    }
+
+    function pause() public virtual onlyPauser {
+        _paused = true;
+        emit Paused(_msgSender());
+    }
+
+    function unpause() public virtual onlyPauser {
+        _paused = false;
+        emit Unpaused(_msgSender());
+    }
+
+    function transferPauser(address newPauser) public virtual onlyPauser {
+        require(newPauser != address(0), "Invalid pauser address");
+        address oldPauser = _pauser;
+        _pauser = newPauser;
+        emit PauserTransferred(oldPauser, newPauser);
+    }
+}
+
+/**
+ * @title FactoryERC20
+ * @dev Factory-deployable ERC-20 with pausable functionality
+ */
+contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, ReentrancyGuard, Pausable {
     // Storage layout optimized for gas (packed into fewer slots)
     address private _creator;           // slot 0 (20 bytes)
     uint8 private _decimals;            // slot 0 (1 byte) - PACKED!
@@ -97,7 +156,8 @@ contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, Reentran
         string symbol,
         uint8 decimals,
         uint256 initialSupply,
-        address indexed creator
+        address indexed creator,
+        address indexed pauser
     );
     
     // Custom errors
@@ -107,27 +167,27 @@ contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, Reentran
     
     /**
      * @dev Sets the factory address on deployment
-     * @notice Only the deployer (factory) can initialize this token
      */
-    constructor() {
+    constructor() Pausable(address(0)) {
         FACTORY = msg.sender;
     }
     
     /**
      * @dev Initializes the token with parameters
-     * @notice Can only be called once by the factory contract
      * @param name_ Token name (1-32 characters)
      * @param symbol_ Token symbol (1-10 characters)
      * @param decimals_ Decimals (max 18, typically 18)
      * @param initialSupply_ Initial supply in base units
      * @param creator_ Address to receive initial supply
+     * @param pauser_ Address that can pause/unpause the token
      */
     function initialize(
         string memory name_,
         string memory symbol_,
         uint8 decimals_,
         uint256 initialSupply_,
-        address creator_
+        address creator_,
+        address pauser_
     ) external nonReentrant {
         // Access control: only factory can initialize
         if (msg.sender != FACTORY) revert OnlyFactory();
@@ -148,10 +208,12 @@ contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, Reentran
         if (creator_ == address(0)) {
             revert InvalidParameter("creator");
         }
+        if (pauser_ == address(0)) {
+            revert InvalidParameter("pauser");
+        }
         if (initialSupply_ == 0) {
             revert InvalidParameter("initialSupply");
         }
-        // Prevent overflow issues with extremely large supplies
         if (initialSupply_ > type(uint128).max) {
             revert InvalidParameter("initialSupply too large");
         }
@@ -163,108 +225,81 @@ contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, Reentran
         _creator = creator_;
         _initialized = true;
         
+        // Set pauser
+        _pauser = pauser_;
+        
         // Mint initial supply
         _totalSupply = initialSupply_;
         _balances[creator_] = initialSupply_;
         
-        emit TokenInitialized(name_, symbol_, decimals_, initialSupply_, creator_);
+        emit TokenInitialized(name_, symbol_, decimals_, initialSupply_, creator_, pauser_);
         emit Transfer(address(0), creator_, initialSupply_);
     }
     
-    /**
-     * @dev Returns the name of the token
-     */
     function name() public view virtual returns (string memory) {
         return _name;
     }
     
-    /**
-     * @dev Returns the symbol of the token
-     */
     function symbol() public view virtual returns (string memory) {
         return _symbol;
     }
     
-    /**
-     * @dev Returns the decimals of the token
-     */
     function decimals() public view virtual returns (uint8) {
         return _decimals;
     }
     
-    /**
-     * @dev Returns the total supply of tokens
-     */
     function totalSupply() public view virtual returns (uint256) {
         return _totalSupply;
     }
     
-    /**
-     * @dev Returns the balance of an account
-     */
     function balanceOf(address account) public view virtual returns (uint256) {
         return _balances[account];
     }
     
-    /**
-     * @dev Returns the creator address
-     */
     function creator() public view returns (address) {
         return _creator;
     }
     
-    /**
-     * @dev Returns the factory address
-     */
     function factory() public view returns (address) {
         return FACTORY;
     }
     
-    /**
-     * @dev Returns whether the token has been initialized
-     */
     function initialized() public view returns (bool) {
         return _initialized;
     }
     
     /**
-     * @dev Transfers tokens to a recipient
+     * @dev Transfer tokens - can be paused
      */
-    function transfer(address to, uint256 value) public virtual returns (bool) {
+    function transfer(address to, uint256 value) public virtual whenNotPaused returns (bool) {
         address owner = _msgSender();
         _transfer(owner, to, value);
         return true;
     }
     
-    /**
-     * @dev Returns the allowance of a spender for an owner
-     */
     function allowance(address owner, address spender) public view virtual returns (uint256) {
         return _allowances[owner][spender];
     }
     
     /**
-     * @dev Approves a spender to spend tokens
+     * @dev Approve spender - can be paused
      */
-    function approve(address spender, uint256 value) public virtual returns (bool) {
+    function approve(address spender, uint256 value) public virtual whenNotPaused returns (bool) {
         address owner = _msgSender();
         _approve(owner, spender, value);
         return true;
     }
     
     /**
-     * @dev Transfers tokens from one address to another using allowance
+     * @dev Transfer from - can be paused
      */
-    function transferFrom(address from, address to, uint256 value) public virtual returns (bool) {
+    function transferFrom(address from, address to, uint256 value) public virtual whenNotPaused returns (bool) {
         address spender = _msgSender();
         _spendAllowance(from, spender, value);
         _transfer(from, to, value);
         return true;
     }
     
-    /**
-     * @dev Internal transfer function
-     */
     function _transfer(address from, address to, uint256 value) internal {
         if (from == address(0)) {
             revert ERC20InvalidSender(address(0));
@@ -275,9 +310,6 @@ contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, Reentran
         _update(from, to, value);
     }
     
-    /**
-     * @dev Updates balances for transfers, mints, and burns
-     */
     function _update(address from, address to, uint256 value) internal virtual {
         if (from == address(0)) {
             _totalSupply += value;
@@ -304,16 +336,10 @@ contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, Reentran
         emit Transfer(from, to, value);
     }
     
-    /**
-     * @dev Internal approve function
-     */
     function _approve(address owner, address spender, uint256 value) internal {
         _approve(owner, spender, value, true);
     }
     
-    /**
-     * @dev Internal approve with optional event emission
-     */
     function _approve(address owner, address spender, uint256 value, bool emitEvent) internal virtual {
         if (owner == address(0)) {
             revert ERC20InvalidApprover(address(0));
@@ -327,9 +353,6 @@ contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, Reentran
         }
     }
     
-    /**
-     * @dev Spends allowance for transferFrom
-     */
     function _spendAllowance(address owner, address spender, uint256 value) internal virtual {
         uint256 currentAllowance = allowance(owner, spender);
         if (currentAllowance < type(uint256).max) {
@@ -345,29 +368,35 @@ contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, Reentran
 
 /**
  * @title TokenFactory
- * @dev Improved factory for deploying ERC-20 tokens with security and gas optimizations
- * @notice This factory uses minimal proxy clones for gas-efficient token deployment
+ * @dev Factory for deploying ERC-20 tokens with USDC deployment fee
+ * @notice Requires $20 USDC fee to create tokens
  */
-contract TokenFactory is ReentrancyGuard {
+contract TokenFactory is ReentrancyGuard, Pausable {
+    // USDC token address (Ethereum mainnet)
+    // For testing, replace with your testnet USDC address
+    IERC20 public immutable USDC;
+    
     // Implementation contract for cloning
     address public immutable implementation;
     
-    // Owner for potential future governance
+    // Owner for governance
     address public owner;
     
-    // Token tracking with pagination support
+    // Fee configuration
+    uint256 public constant DEPLOYMENT_FEE = 20 * 10**6; // $20 USDC (6 decimals)
+    
+    // Token tracking
     address[] private _deployedTokens;
     mapping(address => address[]) private _tokensByCreator;
     mapping(address => bool) private _isDeployedToken;
     
-    // Configuration
     uint256 public constant MAX_TOKENS_PER_CREATOR = 100;
-    uint256 public deploymentFee;
     
     // Events
     event TokenCreated(
         address indexed tokenAddress,
         address indexed creator,
+        address indexed pauser,
         string name,
         string symbol,
         uint8 decimals,
@@ -375,14 +404,16 @@ contract TokenFactory is ReentrancyGuard {
         uint256 timestamp
     );
     
-    event DeploymentFeeUpdated(uint256 oldFee, uint256 newFee);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event USDCWithdrawn(address indexed to, uint256 amount);
     
     // Custom errors
     error MaxTokensReached();
-    error InsufficientFee();
+    error InsufficientUSDCAllowance();
+    error USDCTransferFailed();
     error TransferFailed();
     error OnlyOwner();
+    error InvalidAddress();
     
     modifier onlyOwner() {
         if (msg.sender != owner) revert OnlyOwner();
@@ -390,46 +421,63 @@ contract TokenFactory is ReentrancyGuard {
     }
     
     /**
-     * @dev Deploys the implementation contract and sets up the factory
+     * @dev Deploys the factory with USDC address
+     * @param usdc_ Address of USDC token contract
+     * @param pauser_ Address that can pause the factory
      */
-    constructor() {
+    constructor(address usdc_, address pauser_) Pausable(pauser_) {
+        if (usdc_ == address(0)) revert InvalidAddress();
+        
+        USDC = IERC20(usdc_);
         implementation = address(new FactoryERC20());
         owner = msg.sender;
-        deploymentFee = 0; // Free deployment by default
     }
     
     /**
-     * @dev Creates a new ERC-20 token using minimal proxy pattern
+     * @dev Creates a new ERC-20 token
+     * @notice Requires USDC approval of at least $20 before calling
      * @param name_ Token name (1-32 characters)
      * @param symbol_ Token symbol (1-10 characters)  
      * @param decimals_ Number of decimals (max 18, typically 18)
-     * @param initialSupply_ Initial supply in base units (must be > 0)
+     * @param initialSupply_ Initial supply in base units
+     * @param pauser_ Address that can pause the created token
      * @return token Address of the newly created token
      */
     function createToken(
         string memory name_,
         string memory symbol_,
         uint8 decimals_,
-        uint256 initialSupply_
-    ) external payable nonReentrant returns (address token) {
-        // Check deployment fee
-        if (msg.value < deploymentFee) revert InsufficientFee();
-        
+        uint256 initialSupply_,
+        address pauser_
+    ) external nonReentrant whenNotPaused returns (address token) {
         // Check creator token limit
         if (_tokensByCreator[msg.sender].length >= MAX_TOKENS_PER_CREATOR) {
             revert MaxTokensReached();
         }
         
+        // Check USDC allowance
+        uint256 allowance = USDC.allowance(msg.sender, address(this));
+        if (allowance < DEPLOYMENT_FEE) {
+            revert InsufficientUSDCAllowance();
+        }
+        
+        // Collect USDC fee
+        bool success = USDC.transferFrom(msg.sender, address(this), DEPLOYMENT_FEE);
+        if (!success) {
+            revert USDCTransferFailed();
+        }
+        
         // Deploy minimal proxy clone
         token = _clone(implementation);
         
-        // Initialize the token (now protected by factory-only access)
+        // Initialize the token
         FactoryERC20(token).initialize(
             name_,
             symbol_,
             decimals_,
             initialSupply_,
-            msg.sender
+            msg.sender,
+            pauser_
         );
         
         // Track the deployed token
@@ -440,6 +488,7 @@ contract TokenFactory is ReentrancyGuard {
         emit TokenCreated(
             token,
             msg.sender,
+            pauser_,
             name_,
             symbol_,
             decimals_,
@@ -452,13 +501,11 @@ contract TokenFactory is ReentrancyGuard {
     
     /**
      * @dev Minimal proxy clone implementation (EIP-1167)
-     * @param implementation_ Address of implementation contract
-     * @return instance Address of the clone
      */
     function _clone(address implementation_) private returns (address instance) {
         assembly {
             let ptr := mload(0x40)
-            mstore(ptr, 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
+            mstore(ptr, 0x3d602d80600a3d3981f3363d3d3d363d73000000000000000000000000000000)
             mstore(add(ptr, 0x14), shl(0x60, implementation_))
             mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
             instance := create(0, ptr, 0x37)
@@ -467,7 +514,7 @@ contract TokenFactory is ReentrancyGuard {
     }
     
     /**
-     * @dev Get total number of tokens deployed by this factory
+     * @dev Get total number of tokens deployed
      */
     function getTotalTokens() external view returns (uint256) {
         return _deployedTokens.length;
@@ -475,7 +522,6 @@ contract TokenFactory is ReentrancyGuard {
     
     /**
      * @dev Get all tokens created by a specific address
-     * @param creator Address of the token creator
      */
     function getTokensByCreator(address creator) external view returns (address[] memory) {
         return _tokensByCreator[creator];
@@ -483,8 +529,6 @@ contract TokenFactory is ReentrancyGuard {
     
     /**
      * @dev Get paginated list of deployed tokens
-     * @param offset Starting index
-     * @param limit Maximum number of tokens to return
      */
     function getTokensPaginated(uint256 offset, uint256 limit) 
         external 
@@ -514,7 +558,6 @@ contract TokenFactory is ReentrancyGuard {
     
     /**
      * @dev Check if an address is a token deployed by this factory
-     * @param token Address to check
      */
     function isDeployedToken(address token) external view returns (bool) {
         return _isDeployedToken[token];
@@ -522,7 +565,6 @@ contract TokenFactory is ReentrancyGuard {
     
     /**
      * @dev Get token at specific index
-     * @param index Index in the deployed tokens array
      */
     function getTokenAtIndex(uint256 index) external view returns (address) {
         require(index < _deployedTokens.length, "Index out of bounds");
@@ -530,30 +572,32 @@ contract TokenFactory is ReentrancyGuard {
     }
     
     /**
-     * @dev Update deployment fee (only owner)
-     * @param newFee New fee in wei
+     * @dev Withdraw collected USDC fees (only owner)
      */
-    function setDeploymentFee(uint256 newFee) external onlyOwner {
-        uint256 oldFee = deploymentFee;
-        deploymentFee = newFee;
-        emit DeploymentFeeUpdated(oldFee, newFee);
+    function withdrawUSDC(address to) external onlyOwner {
+        if (to == address(0)) revert InvalidAddress();
+        
+        uint256 balance = USDC.balanceOf(address(this));
+        require(balance > 0, "No USDC to withdraw");
+        
+        bool success = USDC.transfer(to, balance);
+        if (!success) revert USDCTransferFailed();
+        
+        emit USDCWithdrawn(to, balance);
     }
     
     /**
-     * @dev Withdraw collected fees (only owner)
+     * @dev Get current USDC balance in factory
      */
-    function withdrawFees() external onlyOwner {
-        uint256 balance = address(this).balance;
-        (bool success, ) = owner.call{value: balance}("");
-        if (!success) revert TransferFailed();
+    function getUSDCBalance() external view returns (uint256) {
+        return USDC.balanceOf(address(this));
     }
     
     /**
      * @dev Transfer ownership (only owner)
-     * @param newOwner Address of the new owner
      */
     function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Invalid address");
+        if (newOwner == address(0)) revert InvalidAddress();
         address oldOwner = owner;
         owner = newOwner;
         emit OwnershipTransferred(oldOwner, newOwner);
@@ -561,9 +605,20 @@ contract TokenFactory is ReentrancyGuard {
     
     /**
      * @dev Get number of tokens created by an address
-     * @param creator Address of the creator
      */
     function getCreatorTokenCount(address creator) external view returns (uint256) {
         return _tokensByCreator[creator].length;
+    }
+    
+    /**
+     * @dev Emergency withdrawal of any ERC20 tokens (only owner)
+     * @notice Use for recovering accidentally sent tokens
+     */
+    function emergencyWithdrawToken(address token, address to, uint256 amount) external onlyOwner {
+        if (to == address(0)) revert InvalidAddress();
+        require(token != address(0), "Invalid token");
+        
+        bool success = IERC20(token).transfer(to, amount);
+        if (!success) revert TransferFailed();
     }
 }
