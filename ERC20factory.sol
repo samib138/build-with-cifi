@@ -75,7 +75,7 @@ abstract contract ReentrancyGuard {
  */
 abstract contract Pausable is Context {
     bool private _paused;
-    address private _pauser;
+    address internal _pauserAddress;
 
     event Paused(address account);
     event Unpaused(address account);
@@ -86,11 +86,11 @@ abstract contract Pausable is Context {
     error OnlyPauser();
 
     constructor(address pauser_) {
-        _pauser = pauser_;
+        _pauserAddress = pauser_;
     }
 
     modifier onlyPauser() {
-        if (_msgSender() != _pauser) revert OnlyPauser();
+        if (_msgSender() != _pauserAddress) revert OnlyPauser();
         _;
     }
 
@@ -109,7 +109,7 @@ abstract contract Pausable is Context {
     }
 
     function pauser() public view virtual returns (address) {
-        return _pauser;
+        return _pauserAddress;
     }
 
     function pause() public virtual onlyPauser {
@@ -124,8 +124,8 @@ abstract contract Pausable is Context {
 
     function transferPauser(address newPauser) public virtual onlyPauser {
         require(newPauser != address(0), "Invalid pauser address");
-        address oldPauser = _pauser;
-        _pauser = newPauser;
+        address oldPauser = _pauserAddress;
+        _pauserAddress = newPauser;
         emit PauserTransferred(oldPauser, newPauser);
     }
 }
@@ -226,7 +226,7 @@ contract FactoryERC20 is Context, IERC20, IERC20Metadata, IERC20Errors, Reentran
         _initialized = true;
         
         // Set pauser
-        _pauser = pauser_;
+        _pauserAddress = pauser_;
         
         // Mint initial supply
         _totalSupply = initialSupply_;
